@@ -1,0 +1,1 @@
+{"name":"local-codeagent","version":"0.1.0","private":true,"type":"module","bin":{"codeagent":"./cli.mjs"},"engines":{"node":">=22"},"scripts":{"test":"node --test policy.test.mjs","start":"node cli.mjs"},"dependencies":{"@anthropic-ai/claude-agent-sdk":"0.3.331","zod":"4.4.3"}}
