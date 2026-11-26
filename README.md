@@ -27,6 +27,10 @@ cd C:\LocalGitRepos\my-project
 $env:ANTHROPIC_API_KEY = Read-Host 'Anthropic API key' -MaskInput
 $env:CODEAGENT_BUDGET_USD = '1.00'
 $env:CODEAGENT_TURN_USD = '0.25'
+$env:CODEAGENT_MAX_CALLS = '80'
+$env:CODEAGENT_WEB_DOMAINS = 'databricks.com microsoft.com teradata.com github.com/databricks github.com/databrickslabs github.com/microsoft github.com/teradata'
+# or for all sites
+# $env:CODEAGENT_WEB_DOMAINS = '*'
 $env:CODEAGENT_MODEL = 'claude-fable-5-2'
 codeagent.cmd
 ```
