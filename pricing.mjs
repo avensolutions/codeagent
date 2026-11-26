@@ -20,8 +20,11 @@ export const FALLBACK_MODELS = new Set(['claude-fable-5-2', 'claude-fable-5-1', 
 // Highest output price a fallback attempt can bill at (the documented fallback targets are Opus 5 and Opus 4.8).
 export const FALLBACK_OUTPUT_PRICE = 25;
 
+// USD per web search. Web fetch has no per-request charge: fetched pages are billed as input tokens.
+export const WEB_SEARCH_PRICE = 0.01;
+
 // Estimated USD cost of one API response. usage.iterations, when present, lists every attempt
-// (including declined and fallback attempts) with its own model, so each is priced separately.
+// (including declined, fallback and compaction steps) with its own model, so each is priced separately.
 export function costOf(message, requestedModel) {
  const u = message.usage ?? {};
  const parts = u.iterations?.length ? u.iterations : [{...u, model: message.model}];
@@ -33,5 +36,5 @@ export function costOf(message, requestedModel) {
   total += (it.input_tokens ?? 0) * input + (it.output_tokens ?? 0) * output
    + (writes - write1h) * write5m + write1h * input * 2 + (it.cache_read_input_tokens ?? 0) * read;
  }
- return total / 1e6;
+ return total / 1e6 + (u.server_tool_use?.web_search_requests ?? 0) * WEB_SEARCH_PRICE;
 }

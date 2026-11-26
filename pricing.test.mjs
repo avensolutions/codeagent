@@ -21,6 +21,18 @@ test('unknown models are priced at the highest listed rate',()=>{
  close(costOf({model:'claude-unknown',usage:{input_tokens:0,output_tokens:1000}},'claude-fable-5-2'),1000*maxOut/1e6);
 });
 
+test('web searches add $0.01 each; web fetches add nothing beyond tokens',()=>{
+ const msg={model:'claude-fable-5-2',usage:{input_tokens:100,output_tokens:10,server_tool_use:{web_search_requests:3,web_fetch_requests:5}}};
+ close(costOf(msg,'claude-fable-5-2'),(100*8+10*40)/1e6+0.03);
+});
+
+test('compaction steps in usage.iterations are priced at the requested model',()=>{
+ const msg={model:'claude-fable-5-2',usage:{input_tokens:40,output_tokens:20,iterations:[
+  {type:'compaction',input_tokens:1000,output_tokens:300,cache_creation_input_tokens:0,cache_read_input_tokens:0},
+  {type:'message',model:'claude-fable-5-2',input_tokens:40,output_tokens:20,cache_creation_input_tokens:0,cache_read_input_tokens:0}]}};
+ close(costOf(msg,'claude-fable-5-2'),(1000*8+300*40+40*8+20*40)/1e6);
+});
+
 test('1-hour cache writes are priced at twice the input rate',()=>{
  const msg={model:'claude-opus-5-5',usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:300,cache_creation:{ephemeral_5m_input_tokens:100,ephemeral_1h_input_tokens:200},cache_read_input_tokens:0}};
  close(costOf(msg,'claude-opus-5-5'),(100*5+200*4*2)/1e6);
