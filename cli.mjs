@@ -12,7 +12,6 @@ import {policy} from './policy.mjs';
 import {PRICES, FALLBACK_MODELS, FALLBACK_OUTPUT_PRICE, costOf, priceOf} from './pricing.mjs';
 
 const API_URL='https://api.anthropic.com';
-const MAX_CALLS=10;    // model calls per prompt
 const MAX_OUTPUT=32000; // output tokens per call, before the budget limit is applied
 const MIN_OUTPUT=1024;  // smallest output limit worth making a call with
 
@@ -30,6 +29,8 @@ if(!key.startsWith('sk-ant-')) fail(`${envVar('ANTHROPIC_API_KEY')} does not loo
 const usd=(name,fallback)=>{const raw=process.env[name]||fallback;if(raw===undefined)fail(`${envVar(name)} is not set. Set it to a positive amount in USD, e.g. 1.00.`);const n=Number(raw);if(!Number.isFinite(n)||n<=0)fail(`${envVar(name)} must be a positive amount in USD, got "${raw}".`);return n;};
 const budget=usd('CODEAGENT_BUDGET_USD');
 const turnBudget=usd('CODEAGENT_TURN_USD','0.50');
+const count=(name,fallback)=>{const raw=process.env[name]||String(fallback);const n=Number(raw);if(!Number.isInteger(n)||n<1)fail(`${envVar(name)} must be a whole number of 1 or more, got "${raw}".`);return n;};
+const maxCalls=count('CODEAGENT_MAX_CALLS',10); // model calls per prompt
 const model=process.env.CODEAGENT_MODEL||'claude-fable-5-2';
 if(!PRICES[model]) fail(`${envVar('CODEAGENT_MODEL')} is "${model}", which has no price data for cost tracking. Use one of: ${Object.keys(PRICES).join(', ')}.`);
 const fallback=FALLBACK_MODELS.has(model);
@@ -67,6 +68,33 @@ async function runTool(use){
  try{return result(await t.run(args.data));}catch(e){return result(String(e.message),true);}
 }
 
+// Live view of one streaming call. Text is printed as it arrives. While nothing printable arrives (the model is
+// thinking, or writing a tool call), a status line on stderr shows what it is doing and for how long.
+function progress(){
+ const tty=process.stderr.isTTY,t0=Date.now();
+ let line='',what='thinking',chars=0,inText=false,last='\n';
+ const clear=()=>{if(line){process.stderr.write('\r'+' '.repeat(line.length)+'\r');line='';}};
+ const draw=()=>{if(!tty||inText)return;clear();line=`... ${what} ${Math.round((Date.now()-t0)/1000)}s${chars?`, ${chars} characters`:''}`;process.stderr.write(line);};
+ const timer=setInterval(draw,1000);
+ const endText=()=>{if(inText&&last!=='\n')process.stdout.write('\n');last='\n';inText=false;};
+ return {
+  event(e){
+   if(e.type==='content_block_start'){
+    const b=e.content_block;
+    if(b.type==='text'){clear();inText=true;}
+    else if(b.type==='tool_use'){what=`writing ${b.name} call`;chars=0;}
+    else if(b.type==='thinking'){what='thinking';chars=0;}
+   }else if(e.type==='content_block_delta'){
+    const d=e.delta;
+    if(d.type==='text_delta'&&d.text){process.stdout.write(d.text);last=d.text.at(-1);}
+    else if(d.type==='input_json_delta')chars+=d.partial_json.length;
+    else if(d.type==='thinking_delta')chars+=d.thinking.length;
+   }else if(e.type==='content_block_stop')endText();
+  },
+  done(){clearInterval(timer);clear();endText();}
+ };
+}
+
 // After a fallback that happens mid-output, only text blocks from before the last fallback marker may be sent back.
 const echoable=content=>{const i=content.findLastIndex(b=>b.type==='fallback');return i<0?content:content.filter((b,j)=>j>=i||b.type==='text');};
 
@@ -80,7 +108,7 @@ function info(){
   `Source:  ${installDir} (${source})`,
   `Runtime: Node ${process.version}, @anthropic-ai/sdk ${SDK_VERSION}`,
   `Model:   ${model}${fallback?' (refusal fallback on)':''}, $${inPrice} / $${outPrice} per million input / output tokens`,
-  `Budget:  $${budget} per session, $${turnBudget} per prompt`].join('\n');
+  `Limits:  $${budget} per session; $${turnBudget} and ${maxCalls} model calls per prompt`].join('\n');
 }
 
 let messages=[],noted='[]',spent=0;
@@ -93,13 +121,18 @@ async function runPrompt(input){
  content.push({type:'text',text:input});
  messages.push({role:'user',content});
  while(true){
-  if(calls>=MAX_CALLS){status=`stopped after ${MAX_CALLS} model calls`;break;}
+  if(calls>=maxCalls){status=`stopped after ${maxCalls} model call${maxCalls===1?'':'s'} (CODEAGENT_MAX_CALLS); tool results so far are kept, so send "continue" to carry on`;break;}
   const maxTokens=Math.min(MAX_OUTPUT,Math.floor((cap-cost)*1e6/outPrice));
   if(maxTokens<MIN_OUTPUT){status='prompt budget used up';break;}
   let msg;
+  const view=progress();
   try{
-   msg=await client.beta.messages.stream({model,max_tokens:maxTokens,system,tools:toolDefs,messages,cache_control:{type:'ephemeral'},...(fallback?{betas:['server-side-fallback-2026-07-01'],fallbacks:'default'}:{})}).finalMessage();
+   const stream=client.beta.messages.stream({model,max_tokens:maxTokens,system,tools:toolDefs,messages,cache_control:{type:'ephemeral'},...(fallback?{betas:['server-side-fallback-2026-07-01'],fallbacks:'default'}:{})});
+   stream.on('streamEvent',e=>view.event(e));
+   msg=await stream.finalMessage();
+   view.done();
   }catch(e){
+   view.done();
    // A 4xx is a rejected request with nothing generated. Anything else (5xx, dropped stream, network) may have
    // been billed without a usage report, so the session ends to avoid untracked spending.
    const rejected=e instanceof Anthropic.APIError&&e.status>=400&&e.status<500;
@@ -109,14 +142,14 @@ async function runPrompt(input){
   calls++;
   const callCost=costOf(msg,model);cost+=callCost;spent+=callCost;
   if(msg.model&&msg.model!==model) console.log(out('yellow',`(answered by ${msg.model})`));
-  if(msg.stop_reason==='refusal'){status=`declined${msg.stop_details?.category?` (${msg.stop_details.category})`:''}; this prompt was removed from the conversation`;rollback=true;break;}
-  if(msg.stop_reason==='max_tokens'){status=`response cut off at ${maxTokens} output tokens, the most the remaining prompt budget allows; the partial response was discarded`;break;}
-  if(!['end_turn','tool_use','stop_sequence'].includes(msg.stop_reason)){status=`stopped (${msg.stop_reason}); the partial response was discarded`;break;}
+  if(msg.stop_reason==='refusal'){status=`declined${msg.stop_details?.category?` (${msg.stop_details.category})`:''}; this prompt and any partial response were removed from the conversation`;rollback=true;break;}
+  if(msg.stop_reason==='max_tokens'){status=`response cut off at ${maxTokens} output tokens, the most the remaining prompt budget allows; the partial response was not kept in the conversation`;break;}
+  if(!['end_turn','tool_use','stop_sequence'].includes(msg.stop_reason)){status=`stopped (${msg.stop_reason}); the partial response was not kept in the conversation`;break;}
   const blocks=echoable(msg.content);
-  for(const b of blocks) if(b.type==='text') console.log(b.text);
   messages.push({role:'assistant',content:blocks});
   const uses=blocks.filter(b=>b.type==='tool_use');
   if(msg.stop_reason!=='tool_use'||!uses.length) break;
+  console.log(out('dim',`(call ${calls}: ${money(callCost)}; prompt so far ${money(cost)} of $${cap})`));
   const results=[];
   for(const u of uses) results.push(await runTool(u));
   messages.push({role:'user',content:results});
@@ -125,7 +158,7 @@ async function runPrompt(input){
  return {status,cost,endSession};
 }
 
-console.log(`codeagent ${version} | ${model}${fallback?' (refusal fallback on)':''}\nProject: ${p.root}\nAPI key configured: ${key.slice(0,11)}...${key.slice(-4)} (not yet verified by server)\nEstimated budget: $${budget} per session, $${turnBudget} per prompt\nCommands: /add <directory>, /roots, /cost, /info, /reset, /exit`);
+console.log(`codeagent ${version} | ${model}${fallback?' (refusal fallback on)':''}\nProject: ${p.root}\nAPI key configured: ${key.slice(0,11)}...${key.slice(-4)} (not yet verified by server)\nLimits: $${budget} per session; $${turnBudget} and ${maxCalls} model calls per prompt (cost figures are estimates)\nCommands: /add <directory>, /roots, /cost, /info, /reset, /exit`);
 console.log('Disable Console auto-recharge and check promotional balance BEFORE proceeding. Cost figures are local estimates, not billing caps.');
 const rl=createInterface({input:process.stdin,output:process.stdout});
 const closed=new Promise(r=>rl.once('close',()=>r(null))); // input ended (Ctrl+Z / Ctrl+D or a closed pipe)

@@ -1,1 +1,1 @@
-{"name":"local-codeagent","version":"0.2.0","private":true,"type":"module","bin":{"codeagent":"./cli.mjs"},"engines":{"node":">=22"},"scripts":{"test":"node --test policy.test.mjs pricing.test.mjs","start":"node cli.mjs"},"dependencies":{"@anthropic-ai/sdk":"1.14.0","zod":"4.6.7"}}
+{"name":"local-codeagent","version":"0.2.1","private":true,"type":"module","bin":{"codeagent":"./cli.mjs"},"engines":{"node":">=22"},"scripts":{"test":"node --test policy.test.mjs pricing.test.mjs","start":"node cli.mjs"},"dependencies":{"@anthropic-ai/sdk":"1.14.0","zod":"4.6.7"}}
