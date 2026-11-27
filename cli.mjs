@@ -195,15 +195,23 @@ async function listMemory(){
  return `Memory folder: ${memoryDir}\n${files.length?files.join('\n'):'  (empty)'}`;
 }
 
-let messages=[],noted='[]',spent=0;
+// paused: the conversation ends with a server tool run the API paused (pause_turn), which happens when a prompt
+// stops at its call or budget limit right after a pause. The API resumes the run when the history is sent back
+// unchanged and rejects a new user message after it, so the next prompt resumes the run first.
+let messages=[],noted='[]',spent=0,paused=false;
 
 async function runPrompt(input){
- const cap=Math.min(budget-spent,turnBudget),start=messages.length,prevNoted=noted;
+ const cap=Math.min(budget-spent,turnBudget),start=messages.length,prevNoted=noted,prevPaused=paused;
  let cost=0,calls=0,status='done',rollback=false,endSession=false;
- const content=[],refs=JSON.stringify([...p.refs]);
- if(refs!==noted){content.push({type:'text',text:`[codeagent] Approved read-only reference roots: ${refs}`});noted=refs;}
- content.push({type:'text',text:input});
- messages.push({role:'user',content});
+ const userMessage=()=>{
+  const content=[],refs=JSON.stringify([...p.refs]);
+  if(refs!==noted){content.push({type:'text',text:`[codeagent] Approved read-only reference roots: ${refs}`});noted=refs;}
+  content.push({type:'text',text:input});
+  return {role:'user',content};
+ };
+ // After a paused run, "continue" only resumes it. Other input is held back until the resumed turn has finished.
+ let held=paused&&!/^continue\.?$/i.test(input);
+ if(!paused) messages.push(userMessage());
  while(true){
   if(calls>=maxCalls){status=`stopped after ${maxCalls} model call${maxCalls===1?'':'s'} (CODEAGENT_MAX_CALLS); tool results so far are kept, so send "continue" to carry on`;break;}
   const maxTokens=Math.min(MAX_OUTPUT,Math.floor((cap-cost)*1e6/outPrice));
@@ -232,15 +240,21 @@ async function runPrompt(input){
   const blocks=echoable(msg.content);
   messages.push({role:'assistant',content:blocks});
   // The API pauses long server tool runs; sending the history back as it is resumes them.
-  if(msg.stop_reason==='pause_turn'){console.log(out('dim',`(call ${calls}: ${money(callCost)}; web tools paused by the API, resuming)`));continue;}
+  paused=msg.stop_reason==='pause_turn';
+  if(paused){console.log(out('dim',`(call ${calls}: ${money(callCost)}; web tools paused by the API, resuming)`));continue;}
   const uses=blocks.filter(b=>b.type==='tool_use');
-  if(msg.stop_reason!=='tool_use'||!uses.length) break;
+  if(msg.stop_reason!=='tool_use'||!uses.length){
+   // the resumed run has finished, so the input held back can now be sent
+   if(held){held=false;messages.push(userMessage());continue;}
+   break;
+  }
   console.log(out('dim',`(call ${calls}: ${money(callCost)}; prompt so far ${money(cost)} of $${cap})`));
   const results=[];
   for(const u of uses) results.push(await runTool(u));
   messages.push({role:'user',content:results});
  }
- if(rollback||!calls){messages.length=start;noted=prevNoted;}
+ if(held) status+='; your message was not sent because the paused web tool run has not finished. Send "continue" to resume it, then send your message again';
+ if(rollback||!calls){messages.length=start;noted=prevNoted;paused=prevPaused;}
  return {status,cost,endSession};
 }
 
@@ -261,7 +275,7 @@ try{
   if(input==='/roots'){console.log(p.root,[...p.refs]);continue;}
   if(input==='/info'){console.log(info());continue;}
   if(input==='/memory'){console.log(await listMemory());continue;}
-  if(input==='/reset'){messages=[];noted='[]';continue;}
+  if(input==='/reset'){messages=[];noted='[]';paused=false;continue;}
   if(input.startsWith('/add ')){try{console.log('Read-only:',await p.add(input.slice(5).trim().replace(/^"|"$/g,'')));}catch(e){console.error(e.message);}continue;}
   if(input.startsWith('/')){console.log('Unknown command');continue;}
   const r=await runPrompt(input);
