@@ -4,13 +4,13 @@ import {VERSION as SDK_VERSION} from '@anthropic-ai/sdk/version';
 import {BetaLocalFilesystemMemoryTool} from '@anthropic-ai/sdk/tools/memory/node';
 import {z} from 'zod';
 import {readFile,readdir,stat} from 'node:fs/promises';
-import {createInterface} from 'node:readline/promises';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {basename,dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {styleText} from 'node:util';
+import {parseInput,promptReader} from './input.mjs';
 import {policy} from './policy.mjs';
 import {PRICES, FALLBACK_MODELS, FALLBACK_OUTPUT_PRICE, costOf, priceOf} from './pricing.mjs';
 
@@ -210,7 +210,7 @@ async function runPrompt(input){
   return {role:'user',content};
  };
  // After a paused run, "continue" only resumes it. Other input is held back until the resumed turn has finished.
- let held=paused&&!/^continue\.?$/i.test(input);
+ let held=paused&&!/^continue\.?$/i.test(input.trim());
  if(!paused) messages.push(userMessage());
  while(true){
   if(calls>=maxCalls){status=`stopped after ${maxCalls} model call${maxCalls===1?'':'s'} (CODEAGENT_MAX_CALLS); tool results so far are kept, so send "continue" to carry on`;break;}
@@ -258,29 +258,28 @@ async function runPrompt(input){
  return {status,cost,endSession};
 }
 
-console.log(`codeagent ${version} | ${model}${fallback?' (refusal fallback on)':''}\nProject: ${p.root}\nAPI key configured: ${key.slice(0,11)}...${key.slice(-4)} (not yet verified by server)\nLimits: $${budget} per session; $${turnBudget} and ${maxCalls} model calls per prompt (cost figures are estimates)\nWeb: ${webSummary}\nMemory: ${memoryDir}\nInstructions: ${instructionsSummary}\nCommands: /add <directory>, /roots, /cost, /memory, /info, /reset, /exit`);
+console.log(`codeagent ${version} | ${model}${fallback?' (refusal fallback on)':''}\nProject: ${p.root}\nAPI key configured: ${key.slice(0,11)}...${key.slice(-4)} (not yet verified by server)\nLimits: $${budget} per session; $${turnBudget} and ${maxCalls} model calls per prompt (cost figures are estimates)\nWeb: ${webSummary}\nMemory: ${memoryDir}\nInstructions: ${instructionsSummary}\nCommands: /add <directory>, /roots, /cost, /memory, /info, /reset, /exit\nInput: pasted line breaks are kept and Enter sends; end a typed line with \\ for a new line; Ctrl+C clears the input`);
 console.log('Disable Console auto-recharge and check promotional balance BEFORE proceeding. Cost figures are local estimates, not billing caps.');
-const rl=createInterface({input:process.stdin,output:process.stdout});
-const closed=new Promise(r=>rl.once('close',()=>r(null))); // input ended (Ctrl+Z / Ctrl+D or a closed pipe)
-const ask=q=>Promise.race([rl.question(q).catch(()=>null),closed]);
-if((await ask('Confirm billing checks completed (yes/no): '))?.trim()!=='yes'){rl.close();process.exit(0);}
+const reader=promptReader();
+if((await reader.read('Confirm billing checks completed (yes/no): '))?.trim()!=='yes'){reader.close();process.exit(0);}
 try{
  while(budget-spent>=minCallCost){
-  const line=await ask('codeagent> ');
-  if(line===null) break;
-  const input=line.trim();
+  const text=await reader.read('codeagent> ');
+  if(text===null) break;
+  // Commands are one line. Input of several lines goes to the model, even when it starts with "/".
+  const {text:input,command:cmd}=parseInput(text);
   if(!input) continue;
-  if(input==='/exit') break;
-  if(input==='/cost'){console.log(`Estimated ${money(spent)} / $${budget}`);continue;}
-  if(input==='/roots'){console.log(p.root,[...p.refs]);continue;}
-  if(input==='/info'){console.log(info());continue;}
-  if(input==='/memory'){console.log(await listMemory());continue;}
-  if(input==='/reset'){messages=[];noted='[]';paused=false;continue;}
-  if(input.startsWith('/add ')){try{console.log('Read-only:',await p.add(input.slice(5).trim().replace(/^"|"$/g,'')));}catch(e){console.error(e.message);}continue;}
-  if(input.startsWith('/')){console.log('Unknown command');continue;}
+  if(cmd==='/exit') break;
+  if(cmd==='/cost'){console.log(`Estimated ${money(spent)} / $${budget}`);continue;}
+  if(cmd==='/roots'){console.log(p.root,[...p.refs]);continue;}
+  if(cmd==='/info'){console.log(info());continue;}
+  if(cmd==='/memory'){console.log(await listMemory());continue;}
+  if(cmd==='/reset'){messages=[];noted='[]';paused=false;continue;}
+  if(cmd.startsWith('/add ')){try{console.log('Read-only:',await p.add(cmd.slice(5).trim().replace(/^"|"$/g,'')));}catch(e){console.error(e.message);}continue;}
+  if(cmd){console.log('Unknown command');continue;}
   const r=await runPrompt(input);
   console.log(`Result: ${r.status}; estimated ${money(r.cost)}; accumulated ${money(spent)}`);
   if(r.endSession){console.error('The failed request may have been billed without a usage report; ending the session. Check the Console before restarting.');break;}
  }
  if(budget-spent<minCallCost) console.log(`Session budget reached (estimated ${money(spent)} of $${budget}).`);
-}finally{rl.close();}
+}finally{reader.close();}
